@@ -32,7 +32,7 @@ The build script creates a locally ad-hoc-signed app for your Mac's architecture
 
 **Hold** pauses lens changes at the last settled focus. **Start following** resumes local checks. **Stop & restore**, reconnecting, and normal app quit restore the focus and autofocus settings captured when you connected. A crash, force quit, or unplug can prevent restoration; use your camera settings app if necessary.
 
-If tracking becomes uncertain, the app holds the last settled lens position and tries to recover the miniature for up to 1.8 seconds. Recovery searches nearby positions and scales using color and shape, helping it reject unrelated subjects such as a nearby face. A recovered close-up triggers quick focus acquisition. If recovery fails, draw a new box. The tracker follows visual appearance; it does not recognize miniatures semantically, and some occlusions may escape the checks.
+If tracking becomes uncertain or the miniature leaves the frame, the app holds the last settled lens position and keeps looking. Recovery checks nearby positions and scales, then searches across the whole frame using several remembered views of the miniature. It requires consistent matches in two observations before resuming focus changes. A recovered target triggers quick focus acquisition. No new box is needed for an ordinary exit and return; draw a new one to change targets or replace the learned reference. The tracker follows visual appearance rather than recognizing miniatures semantically; an unseen pose, severe blur, or similar-looking object can still defeat recovery.
 
 Uncheck **Track miniature movement** to use a fixed focus region. This can be useful if you keep the mini in one part of the frame or tracking struggles with its appearance.
 
@@ -46,7 +46,7 @@ MiniFocus's selection overlay is displayed only in its preview. It is not added 
 
 ## How focus works
 
-- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and normalized luminance correlation help reject switches to other subjects. Local multiscale template matching handles size changes and brief tracking failures; this is not a semantic miniature detector.
+- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and normalized luminance correlation help reject switches to other subjects. Local multiscale matching handles size changes; persistent whole-frame re-identification handles exits and returns. Up to six confirmed appearances are kept in memory for the current selection. This is not a semantic miniature detector.
 - Initial acquisition holds the selected region fixed, avoiding tracking failures caused by deliberate defocus during the lens sweep. Tracking starts after the final lens position has settled.
 - The app computes luminance Laplacian variance inside the central 76% of the target, so surrounding desktop detail has less influence.
 - Focus search waits for lens settling and takes the median of three samples per position. Selection uses an expanding local bracket followed by finer sampling; Reacquire uses a full coarse scan and refinement. Following uses local probes with an improvement threshold to reduce drift.
@@ -70,7 +70,7 @@ build/MiniFocus.app/Contents/MacOS/MiniFocus --diagnose
 
 Hardware tests intentionally move focus one increment and restore the original settings. Run them with MiniFocus stopped so two controllers do not compete.
 
-The Mac tests passed 109 algorithm checks, USB focus write/readback/restore, and live 1920×1080 preview with USB access still available. Regression tests cover acquisition settling, multiscale recovery, and rejection of an unrelated skin-colored distractor. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. Concurrent OBS preview and the app's transition into following mode were observed; optical performance across painting distances and OBS recording verification are still under evaluation. No camera images or recordings are included in this repository.
+The Mac tests passed 117 algorithm checks, USB focus write/readback/restore, and live 1920×1080 preview with USB access still available. Regression tests cover acquisition settling, multiscale recovery, return at a different frame location, two-observation confirmation, and rejection of an unrelated skin-colored distractor. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. Concurrent OBS preview and the app's transition into following mode were observed; optical performance across painting distances, real exit/return recovery, and OBS recording verification are still under evaluation. No camera images or recordings are included in this repository.
 
 ## Layout
 

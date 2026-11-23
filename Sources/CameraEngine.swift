@@ -10,7 +10,7 @@ struct CameraSnapshot {
     var focus = 0, minimum = 0, maximum = 255, step = 5
     var sharpness = 0.0
     var confidence: Float = 0
-    var connected = false, active = false, lost = false, acquiring = false
+    var connected = false, active = false, lost = false, acquiring = false, followingRequested = false
 }
 
 final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -35,15 +35,21 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var appearance: TargetAppearance?, anchorAppearance: TargetAppearance?
     private var recoveringSince: Double?, lastRecoveryAttempt = 0.0, lastScaleCheck = 0.0
     private var lastPreviewAt = 0.0
+    private var followRequested = false
+    private var appearanceLibrary: [TargetAppearance] = []
+    private var originalSelectionSize = CGSize.zero
+    private var lastLibraryAt = 0.0, lastGlobalSearch = 0.0
+    private var confirmation = ReacquisitionConfirmation()
     var diagnostic = false
 
     private func publish() {
         snapshot.acquiring = acquiring
+        snapshot.followingRequested = followRequested
         let value = snapshot
         DispatchQueue.main.async { self.onUpdate?(value) }
     }
     private func fail(_ message: String) {
-        sweep = nil; acquisition.cancel(); snapshot.active = false; snapshot.message = message; publish()
+        sweep = nil; acquisition.cancel(); snapshot.active = false; followRequested = false; snapshot.message = message; publish()
     }
     func connect() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -113,8 +119,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         queue.async {
             guard self.snapshot.connected else { return }
             self.pauseAtStable()
+            self.followRequested = false
             self.snapshot.target = rectangle; self.snapshot.lost = false; self.snapshot.confidence = 1
             self.appearance = nil; self.anchorAppearance = nil; self.recoveringSince = nil
+            self.appearanceLibrary = []; self.originalSelectionSize = rectangle.size; self.confirmation.reset()
             self.resetTracker(rectangle)
             self.startNow(wide: true, minimum: self.lower, maximum: self.upper, exhaustive: false)
             self.publish()
@@ -147,6 +155,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let clamped = min(max(self.snapshot.focus, minimum), maximum)
             guard self.move(to: clamped) else { return }
             self.stableFocus = clamped; self.snapshot.active = true
+            self.followRequested = true
             self.beginSweep(wide: wide, at: ProcessInfo.processInfo.systemUptime, exhaustive: exhaustive)
             self.publish()
     }
@@ -164,19 +173,20 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
     private func pauseAtStable() {
         if snapshot.active, sweep != nil, snapshot.focus != stableFocus { _ = move(to: stableFocus) }
-        snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil
+        snapshot.active = false; sweep = nil; acquisition.cancel()
     }
     func hold() {
-        queue.async { self.pauseAtStable(); self.snapshot.message = "Holding focus. Click Start following to resume."; self.publish() }
+        queue.async { self.followRequested = false; self.pauseAtStable(); self.snapshot.message = "Holding focus. Target recovery remains available; Start following resumes focus changes."; self.publish() }
     }
     private func holdForLoss(_ message: String) {
-        pauseAtStable(); snapshot.lost = true; snapshot.message = message; publish()
+        followRequested = false; pauseAtStable(); snapshot.lost = true; snapshot.message = message; publish()
     }
     func restore() {
         queue.async { self.restoreNow(); self.publish() }
     }
     private func restoreNow() {
-        snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil
+        snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil; followRequested = false
+        snapshot.target = nil; snapshot.lost = false; appearanceLibrary = []; appearance = nil; anchorAppearance = nil; tracker = nil
         guard let usb = usb else { return }
         if focus_restore(usb) != 0 {
             var position: Int32 = 0, automatic: Int32 = 0
@@ -213,12 +223,13 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             diagnosticFrames += 1
             if diagnosticFrames == 30 { print("DIAGNOSTIC PASS: received 30 analyzed frames; \(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer)); USB control still readable=\(checkUSB())"); fflush(stdout) }
         }
-        if let previous = snapshot.target, !snapshot.lost {
+        if let previous = snapshot.target {
             let frame = makeAppearanceFrame(buffer)
             if sweep == nil, acquisition.releaseIfSettled(at: time) {
                 resetTracker(previous)
                 appearance = frame.signature(previous)
                 if anchorAppearance == nil { anchorAppearance = appearance }
+                remember(frame.signature(previous), at: time)
                 snapshot.message = "Following miniature • focus settled"
             }
             // Deliberate lens sweeps blur the tracker input. Acquire using the
@@ -244,7 +255,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                     var position: Int32 = 0, automatic: Int32 = 0
                     guard let usb = usb, focus_read(usb, &position, &automatic) != 0, automatic == 0, Int(position) == snapshot.focus else {
                         // Do not fight another application's camera controls.
-                        snapshot.active = false; sweep = nil; acquisition.cancel()
+                        snapshot.active = false; sweep = nil; acquisition.cancel(); followRequested = false
                         snapshot.message = "Camera focus changed outside MiniFocus. Close other camera controls, then restart following."
                         publish(); return
                     }
@@ -284,6 +295,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         return AppearanceFrame(width: width, height: height, rgb: rgb)
     }
     private func track(buffer: CVPixelBuffer, frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
+        if snapshot.lost || recoveringSince != nil {
+            return recover(frame: frame, previous: previous, at: time)
+        }
         var observed: VNDetectedObjectObservation?
         if let tracker = tracker {
             do { try sequence.perform([tracker], on: buffer, orientation: .up); observed = tracker.results?.first as? VNDetectedObjectObservation }
@@ -308,6 +322,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 // Learn gradual pose changes only from strong appearance matches.
                 if result.confidence > 0.85, let match = match, match.score > 0.70, anchorColor > 0.72 {
                     appearance = frame.signature(rect)
+                    remember(frame.signature(rect), at: time)
                 }
                 return true
             }
@@ -328,12 +343,50 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
         if recoveringSince == nil {
             if snapshot.active, snapshot.focus != stableFocus { _ = move(to: stableFocus) }
-            sweep = nil; recoveringSince = time
+            sweep = nil; acquisition.cancel(); snapshot.active = false; recoveringSince = time; confirmation.reset()
         }
-        snapshot.confidence = 0
-        if time-(recoveringSince ?? time) > 1.8 {
-            holdForLoss("Mini could not be recovered. Focus held; draw a new box to resume.")
-        } else { snapshot.message = "Recovering miniature • holding focus and rejecting other subjects" }
+        snapshot.confidence = 0; snapshot.lost = true
+        snapshot.message = "Mini out of view • holding focus and looking for it across the frame"
+        return false
+    }
+    private func remember(_ candidate: TargetAppearance, at time: Double) {
+        guard time-lastLibraryAt >= 0.8 || appearanceLibrary.isEmpty else { return }
+        lastLibraryAt = time
+        if appearanceLibrary.contains(where: { $0.match(candidate).score > 0.96 }) { return }
+        appearanceLibrary.append(candidate)
+        // Preserve the original reference while keeping a few more recent poses.
+        if appearanceLibrary.count > 6 { appearanceLibrary.remove(at: 1) }
+    }
+    private func recover(frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
+        guard !appearanceLibrary.isEmpty else {
+            snapshot.message = "Draw a new box to establish a focused miniature reference."; return false
+        }
+        // Continue indefinitely after an exit from the frame. Sampling the whole
+        // frame is slower than following, so limit it independently of preview FPS.
+        guard time-lastGlobalSearch >= 0.4 else { return false }
+        lastGlobalSearch = time
+        var best: (rect: CGRect, score: Double)?
+        for template in appearanceLibrary {
+            if let local = frame.locate(template, around: previous, broad: true), local.score > (best?.score ?? 0) { best = local }
+        }
+        if best == nil {
+            best = frame.reidentify(appearanceLibrary, reference: previous, originalSize: originalSelectionSize)
+        }
+        if let best = best, (anchorAppearance?.match(frame.signature(best.rect)).color ?? 1) >= 0.60 {
+            snapshot.message = "Mini spotted • confirming it before moving focus"
+            guard confirmation.observe(best.rect, at: time) else { return false }
+            snapshot.target = best.rect; snapshot.confidence = Float(best.score); snapshot.lost = false
+            recoveringSince = nil; confirmation.reset(); resetTracker(best.rect)
+            appearance = frame.signature(best.rect)
+            snapshot.active = followRequested
+            if followRequested {
+                beginSweep(wide: true, at: time)
+                snapshot.message = "Mini found • hold it inside the box while focus catches up"
+            } else { snapshot.message = "Mini found • holding focus; Start following resumes focus changes" }
+            return true
+        }
+        confirmation.reset()
+        snapshot.message = "Mini out of view • holding focus and looking for it across the frame"
         return false
     }
     private func checkUSB() -> Bool {

@@ -93,5 +93,23 @@ if let recovered = recovered {
 }
 let noTarget = testFrame(target: CGRect(x: 2,y: 2,width: 0.1,height: 0.1), addDistractor: true)
 check(noTarget.locate(signature, around: referenceBox, broad: true) == nil, "Recovery rejects an unrelated background and skin-colored distractor")
+let returnedBox = CGRect(x: 0.73, y: 0.65, width: 0.15, height: 0.25)
+let returnedFrame = testFrame(target: returnedBox, addDistractor: true)
+let searchStarted = Date()
+let returned = returnedFrame.reidentify([signature], reference: referenceBox, originalSize: referenceBox.size)
+let globalSearchSeconds = Date().timeIntervalSince(searchStarted)
+check(returned != nil, "Whole-frame search rediscovers a miniature returned far from its last position")
+if let returned = returned {
+    check(abs(returned.rect.midX-returnedBox.midX) < 0.045 && abs(returned.rect.midY-returnedBox.midY) < 0.045, "Global rediscovery chooses the returned miniature")
+}
+check(noTarget.reidentify([signature], reference: referenceBox, originalSize: referenceBox.size) == nil, "Off-screen miniature is not replaced by an unrelated subject")
+var confirmation = ReacquisitionConfirmation()
+check(!confirmation.observe(returnedBox, at: 0), "One candidate cannot immediately restart autofocus")
+check(confirmation.observe(returnedBox.offsetBy(dx: 0.01,dy: 0), at: 0.5), "Consistent returned target is confirmed across frames")
+confirmation.reset()
+check(!confirmation.observe(returnedBox, at: 100), "Off-screen wait has no stale confirmation")
+check(!confirmation.observe(referenceBox, at: 100.5), "A jump to a different candidate does not count as confirmation")
+check(confirmation.observe(referenceBox, at: 101), "A stable new location is eventually confirmed")
 print("PASS: \(checks) checks — search, settling, tracking gates, appearance recovery, geometry, and sharpness")
 print("Nearby acquisition lens probes: quick=\(quickProbes), full=\(fullProbes)")
+print(String(format: "Whole-frame recovery search: %.3f seconds", globalSearchSeconds))

@@ -74,4 +74,55 @@ struct AppearanceFrame {
         }
         return best
     }
+
+    // A coarse whole-frame search followed by local refinement. The stored
+    // appearances survive off-screen periods; no lens writes happen here.
+    func reidentify(_ templates: [TargetAppearance], reference: CGRect, originalSize: CGSize) -> (rect: CGRect, score: Double)? {
+        guard !templates.isEmpty else { return nil }
+        var proposals: [(rect: CGRect, score: Double, template: Int)] = []
+        var sizes: [CGSize] = []
+        for base in [reference.size, originalSize] {
+            for scale in [0.5,0.7,1.0,1.4,2.0] {
+                let size = CGSize(width: base.width*scale, height: base.height*scale)
+                if size.width >= 0.025, size.height >= 0.025, size.width <= 0.85, size.height <= 0.85,
+                   !sizes.contains(where: { abs($0.width-size.width) < 0.005 && abs($0.height-size.height) < 0.005 }) { sizes.append(size) }
+            }
+        }
+        for size in sizes {
+            let dx = max(0.018, size.width*0.26), dy = max(0.018, size.height*0.26)
+            for y in stride(from: 0.0, through: 1-size.height, by: dy) {
+                for x in stride(from: 0.0, through: 1-size.width, by: dx) {
+                    let rect = CGRect(origin: CGPoint(x:x,y:y), size: size)
+                    let candidate = signature(rect)
+                    for (index, template) in templates.enumerated() {
+                        let match = template.match(candidate)
+                        guard match.color >= 0.62, match.correlation >= 0.12, match.score >= 0.52 else { continue }
+                        if proposals.count < 12 || match.score > proposals.last!.score {
+                            proposals.append((rect,match.score,index)); proposals.sort { $0.score > $1.score }
+                            if proposals.count > 12 { proposals.removeLast() }
+                        }
+                    }
+                }
+            }
+        }
+        var best: (rect: CGRect, score: Double)?
+        for proposal in proposals {
+            if let refined = locate(templates[proposal.template], around: proposal.rect, broad: false), refined.score >= 0.72,
+               refined.score > (best?.score ?? 0) { best = refined }
+        }
+        return best
+    }
+}
+
+struct ReacquisitionConfirmation {
+    private var previous: CGRect?
+    private var previousTime = 0.0
+    mutating func reset() { previous = nil }
+    mutating func observe(_ rect: CGRect, at time: Double) -> Bool {
+        defer { previous = rect; previousTime = time }
+        guard let previous = previous, time-previousTime <= 2 else { return false }
+        let overlap = previous.intersection(rect)
+        let union = previous.width*previous.height + rect.width*rect.height - max(0,overlap.width)*max(0,overlap.height)
+        return !overlap.isNull && overlap.width*overlap.height/max(0.0001,union) >= 0.35
+    }
 }

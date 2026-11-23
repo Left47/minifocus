@@ -30,7 +30,7 @@ final class PreviewView: NSView {
             let color: NSColor = lost ? .systemOrange : .systemMint
             color.withAlphaComponent(0.12).setFill(); rect.fill()
             color.setStroke(); let path = NSBezierPath(rect: rect); path.lineWidth = 2; path.stroke()
-            let label = lost ? "RESELECT MINI" : "FOCUS TARGET"
+            let label = lost ? "LOOKING FOR MINI" : "FOCUS TARGET"
             let attributes: [NSAttributedString.Key: Any] = [.foregroundColor: color, .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .bold), .backgroundColor: NSColor.black.withAlphaComponent(0.7)]
             label.draw(at: NSPoint(x: rect.minX+4, y: max(videoRect.minY, rect.maxY-19)), withAttributes: attributes)
         }
@@ -100,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         metrics.font = .monospacedSystemFont(ofSize: 12, weight: .medium); metrics.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 14, weight: .medium); status.maximumNumberOfLines = 3
         status.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
-        let help = NSTextField(wrappingLabelWithString: "Draw a box, then hold the mini inside it while focus is acquired. Tracking starts after the search.\nOBS: use the Logitech C930e as your Video Capture Device; leave native autofocus off. Hold pauses lens changes. Reacquire searches again. Search limits use lens units, not inches.")
+        let help = NSTextField(wrappingLabelWithString: "Draw a box and hold the mini steady for focus. If it leaves the frame, focus holds and following resumes when it returns.\nOBS: use the Logitech C930e as your Video Capture Device; leave native autofocus off. Hold pauses lens changes. Reacquire runs a full search. Search limits use lens units, not inches.")
         help.textColor = .secondaryLabelColor; help.font = .systemFont(ofSize: 12); help.maximumNumberOfLines = 4
         let stack = NSStackView(views: [title, subtitle, preview, buttons, limits, metrics, status, help])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
@@ -144,14 +144,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         preview.image = value.image; preview.target = value.target; preview.lost = value.lost
         status.stringValue = value.message
         status.textColor = value.lost ? .systemOrange : .labelColor
-        let mode = value.acquiring ? "ACQUIRING" : (value.active ? "FOLLOWING" : "IDLE / HOLD")
+        let mode = value.acquiring ? "ACQUIRING" : (value.lost ? "LOOKING FOR MINI" : (value.active ? "FOLLOWING" : "IDLE / HOLD"))
         metrics.stringValue = String(format: "FOCUS %d   ·   SHARPNESS %.1f   ·   TRACKING %.0f%%   ·   %@", value.focus, value.sharpness, Double(value.confidence)*100, mode)
         if value.connected && !hadConnection { minimum.stringValue = "\(value.minimum)"; maximum.stringValue = "\(value.maximum)" }
         hadConnection = value.connected
         connect.title = value.connected ? "Reconnect" : "Connect"; connect.isEnabled = true
         let canStart = value.connected && value.target != nil && !value.lost && value.image != nil
         start.isEnabled = canStart && !value.active; reacquire.isEnabled = canStart
-        hold.isEnabled = value.active; restore.isEnabled = value.connected
+        hold.isEnabled = value.followingRequested; restore.isEnabled = value.connected
     }
     @objc private func connectCamera() {
         connect.isEnabled = false
