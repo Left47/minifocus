@@ -4,15 +4,50 @@ import CoreGraphics
 struct TargetAppearance {
     let luminance: [Double]
     let histogram: [Double]
-    func match(_ other: TargetAppearance) -> (score: Double, color: Double, correlation: Double) {
-        let color = zip(histogram, other.histogram).reduce(0) { $0 + sqrt($1.0 * $1.1) }
-        let a = luminance.reduce(0,+) / Double(luminance.count), b = other.luminance.reduce(0,+) / Double(other.luminance.count)
-        var dot = 0.0, aa = 0.0, bb = 0.0
-        for i in luminance.indices {
-            let x = luminance[i]-a, y = other.luminance[i]-b
-            dot += x*y; aa += x*x; bb += y*y
+    var aspectRatio = 1.0
+    var valid: [Bool]? = nil
+    func colorSimilarity(_ other: TargetAppearance) -> Double {
+        zip(histogram, other.histogram).reduce(0) { $0 + sqrt($1.0 * $1.1) }
+    }
+    private func correlation(_ other: TargetAppearance) -> Double {
+        var a = 0.0, b = 0.0, aa = 0.0, bb = 0.0, ab = 0.0, n = 0.0
+        for i in luminance.indices where (valid?[i] ?? true) && (other.valid?[i] ?? true) {
+            let x = luminance[i], y = other.luminance[i]
+            a += x; b += y; aa += x*x; bb += y*y; ab += x*y; n += 1
         }
-        let correlation = aa > 1 && bb > 1 ? dot / sqrt(aa*bb) : 0
+        guard n >= 48 else { return 0 }
+        let energyA = aa-a*a/n, energyB = bb-b*b/n
+        return energyA > 1 && energyB > 1 ? (ab-a*b/n)/sqrt(energyA*energyB) : 0
+    }
+    func rotated(degrees: Int) -> TargetAppearance {
+        if degrees % 360 == 0 { return self }
+        let angle = Double(degrees)*Double.pi/180, c = cos(angle), s = sin(angle)
+        let w = aspectRatio, h = 1.0
+        let outW = abs(w*c)+abs(h*s), outH = abs(w*s)+abs(h*c)
+        var values = [Double](repeating: 0, count: 144), mask = [Bool](repeating: false, count: 144)
+        for y in 0..<12 {
+            for x in 0..<12 {
+                let dx = ((Double(x)+0.5)/12-0.5)*outW, dy = ((Double(y)+0.5)/12-0.5)*outH
+                let u = (c*dx+s*dy)/w+0.5, v = (-s*dx+c*dy)/h+0.5
+                guard u >= 0, v >= 0, u <= 1, v <= 1 else { continue }
+                let px = min(11,max(0,u*12-0.5)), py = min(11,max(0,v*12-0.5))
+                let x0 = Int(px), y0 = Int(py), x1 = min(11,x0+1), y1 = min(11,y0+1)
+                let fx = px-Double(x0), fy = py-Double(y0)
+                values[y*12+x] = (1-fy)*((1-fx)*luminance[y0*12+x0]+fx*luminance[y0*12+x1]) + fy*((1-fx)*luminance[y1*12+x0]+fx*luminance[y1*12+x1])
+                mask[y*12+x] = (valid?[y0*12+x0] ?? true) && (valid?[y1*12+x1] ?? true)
+            }
+        }
+        return TargetAppearance(luminance: values, histogram: histogram, aspectRatio: outW/outH, valid: mask)
+    }
+    func rotationMatch(_ other: TargetAppearance) -> (score: Double, color: Double, correlation: Double) {
+        let color = colorSimilarity(other)
+        guard color >= 0.58 else { return match(other) }
+        let best = stride(from: 0, to: 360, by: 15).map { rotated(degrees: $0).correlation(other) }.max() ?? 0
+        return (0.55*color+0.45*max(0,best), color, best)
+    }
+    func match(_ other: TargetAppearance) -> (score: Double, color: Double, correlation: Double) {
+        let color = colorSimilarity(other)
+        let correlation = correlation(other)
         return (0.55 * color + 0.45 * max(0, correlation), color, correlation)
     }
 }
@@ -48,7 +83,7 @@ struct AppearanceFrame {
                 histogram[bin] += 1.0/144
             }
         }
-        return TargetAppearance(luminance: luminance, histogram: histogram)
+        return TargetAppearance(luminance: luminance, histogram: histogram, aspectRatio: rectangle.width*Double(width)/(rectangle.height*Double(height)))
     }
     func locate(_ template: TargetAppearance, around previous: CGRect, broad: Bool) -> (rect: CGRect, score: Double)? {
         let scales: [Double] = broad ? [0.65,0.85,1,1.25,1.6,2] : [0.85,1,1.18]
@@ -59,18 +94,24 @@ struct AppearanceFrame {
         let centersX = [previous.midX] + Array(stride(from: previous.midX-radiusX, through: previous.midX+radiusX+0.00001, by: dx))
         let centersY = [previous.midY] + Array(stride(from: previous.midY-radiusY, through: previous.midY+radiusY+0.00001, by: dy))
         var best: (rect: CGRect, score: Double)?
+        let variants = stride(from: 0, to: 360, by: 15).map { template.rotated(degrees: $0) }
+        let bases = [previous.size, CGSize(width: previous.height*Double(height)/Double(width), height: previous.width*Double(width)/Double(height))]
+        for base in bases {
         for scale in scales {
-            let w = previous.width*scale, h = previous.height*scale
+            let w = base.width*scale, h = base.height*scale
             guard w >= 0.02, h >= 0.02, w <= 0.9, h <= 0.9 else { continue }
             for cy in centersY {
                 for cx in centersX {
                     let rect = CGRect(x: cx-w/2, y: cy-h/2, width: w, height: h)
                     guard rect.minX >= 0, rect.minY >= 0, rect.maxX <= 1, rect.maxY <= 1 else { continue }
-                    let match = template.match(signature(rect))
+                    let candidate = signature(rect)
+                    guard template.colorSimilarity(candidate) >= 0.60 else { continue }
+                    let match = variants.map { $0.match(candidate) }.max { $0.score < $1.score }!
                     guard match.color >= 0.60, match.correlation >= (broad ? 0.40 : 0.25), match.score >= (broad ? 0.68 : 0.58) else { continue }
                     if match.score > (best?.score ?? 0) { best = (rect,match.score) }
                 }
             }
+        }
         }
         return best
     }
@@ -84,13 +125,15 @@ struct AppearanceFrame {
         guard !templates.isEmpty else { return [] }
         var proposals: [(rect: CGRect, score: Double, template: Int)] = []
         var sizes: [CGSize] = []
-        for base in [reference.size, originalSize] {
+        let swapped = CGSize(width: originalSize.height*Double(height)/Double(width), height: originalSize.width*Double(width)/Double(height))
+        for base in [reference.size, originalSize, swapped] {
             for scale in [0.5,0.7,1.0,1.4,2.0] {
                 let size = CGSize(width: base.width*scale, height: base.height*scale)
                 if size.width >= 0.025, size.height >= 0.025, size.width <= 0.85, size.height <= 0.85,
                    !sizes.contains(where: { abs($0.width-size.width) < 0.005 && abs($0.height-size.height) < 0.005 }) { sizes.append(size) }
             }
         }
+        let coarseVariants = templates.map { template in stride(from: 0, to: 360, by: 45).map { template.rotated(degrees: $0) } }
         for size in sizes {
             let dx = max(0.018, size.width*0.26), dy = max(0.018, size.height*0.26)
             for y in stride(from: 0.0, through: 1-size.height, by: dy) {
@@ -98,7 +141,8 @@ struct AppearanceFrame {
                     let rect = CGRect(origin: CGPoint(x:x,y:y), size: size)
                     let candidate = signature(rect)
                     for (index, template) in templates.enumerated() {
-                        let match = template.match(candidate)
+                        guard template.colorSimilarity(candidate) >= 0.62 else { continue }
+                        let match = coarseVariants[index].map { $0.match(candidate) }.max { $0.score < $1.score }!
                         guard match.color >= 0.62, match.correlation >= 0.12, match.score >= 0.52 else { continue }
                         if proposals.count < 12 || match.score > proposals.last!.score {
                             if let duplicate = proposals.firstIndex(where: { overlap(rect,$0.rect) > 0.55 }) {

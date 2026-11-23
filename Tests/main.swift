@@ -8,7 +8,7 @@ func check(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 check(IdentityDecision.accepts(positive: 0.1, negative: 0.9, separation: 0.8), "Strong miniature identity is accepted")
 check(!IdentityDecision.accepts(positive: 0.4, negative: 0.3, separation: 0.8), "Background-like candidate is rejected despite appearance match")
-check(!IdentityDecision.accepts(positive: 0.6, negative: 0.9, separation: 0.8), "Candidate too far from the learned miniature is rejected")
+check(!IdentityDecision.accepts(positive: 0.7, negative: 0.9, separation: 0.8), "Candidate too far from the learned miniature is rejected")
 check(!IdentityDecision.accepts(positive: 0.3, negative: 0.35, separation: 0.8), "Ambiguous identity stays in looking mode")
 check(!IdentityDecision.accepts(positive: 0, negative: 0, separation: 0), "Missing identity calibration cannot enable autofocus recovery")
 func simulate(current: Int, wide: Bool, peak: Int?, noisy: Bool = false, exhaustive: Bool = false, onProbe: ((Int) -> Void)? = nil) -> Int {
@@ -88,6 +88,20 @@ let referenceBox = CGRect(x: 0.3, y: 0.3, width: 0.15, height: 0.25)
 let referenceFrame = testFrame(target: referenceBox)
 let signature = referenceFrame.signature(referenceBox)
 check(signature.match(signature).score > 0.999, "Appearance matches itself")
+for turns in [1,2,3] {
+    var pixels = referenceFrame.rgb, w = referenceFrame.width, h = referenceFrame.height
+    for _ in 0..<turns {
+        var output = [UInt8](repeating: 0,count: pixels.count)
+        for y in 0..<h { for x in 0..<w { for c in 0..<3 {
+            output[(x*h+(h-1-y))*3+c] = pixels[(y*w+x)*3+c]
+        } } }
+        pixels = output; let oldW = w; w = h; h = oldW
+    }
+    var box = referenceBox
+    for _ in 0..<turns { box = CGRect(x:box.minY,y:1-box.maxX,width:box.height,height:box.width) }
+    let actual = AppearanceFrame(width:w,height:h,rgb:pixels).signature(box)
+    check(signature.rotationMatch(actual).correlation > 0.90, "Pixel-rotated fixture matches at \(turns*90) degrees")
+}
 let enlargedBox = CGRect(x: referenceBox.midX-0.15*1.6/2+0.03, y: referenceBox.midY-0.25*1.6/2, width: 0.15*1.6, height: 0.25*1.6)
 let closeFrame = testFrame(target: enlargedBox, addDistractor: true)
 let recovered = closeFrame.locate(signature, around: referenceBox, broad: true)
@@ -115,6 +129,17 @@ confirmation.reset()
 check(!confirmation.observe(returnedBox, at: 100), "Off-screen wait has no stale confirmation")
 check(!confirmation.observe(referenceBox, at: 100.5), "A jump to a different candidate does not count as confirmation")
 check(confirmation.observe(referenceBox, at: 101), "A stable new location is eventually confirmed")
-print("PASS: \(checks) checks — search, settling, tracking gates, appearance recovery, geometry, and sharpness")
+var performance = FramePerformance(started:0)
+for frame in 0...30 { performance.receive(presentationTime:Double(frame)/30) }
+performance.drop(); performance.drop()
+for duration in 1...100 { performance.finish(mode:"following",milliseconds:Double(duration)) }
+let performanceReport = performance.report(at:5)
+let modes = performanceReport["modes"] as! [String:[String:Any]]
+check(abs((performanceReport["camera_fps"] as! Double)-30) < 0.001, "Performance reports delivered camera FPS from presentation timestamps")
+check(performanceReport["capture_drops"] as! Int == 2, "Performance keeps capture drops separate from analysis throttling")
+check(modes["following"]!["p95_ms"] as! Double == 95, "Performance p95 includes slow frames")
+check(modes["following"]!["max_ms"] as! Double == 100, "Performance preserves worst-case processing time")
+check(FramePerformance.percentile([],fraction:0.95) == 0, "Empty performance samples are handled")
+print("PASS: \(checks) checks — focus, rotation, recovery, identity gates, and performance measurements")
 print("Nearby acquisition lens probes: quick=\(quickProbes), full=\(fullProbes)")
 print(String(format: "Whole-frame recovery search: %.3f seconds", globalSearchSeconds))

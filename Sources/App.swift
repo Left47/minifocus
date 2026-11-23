@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let preview = PreviewView()
     private let status = NSTextField(wrappingLabelWithString: "Connect your C930e to begin.")
     private let metrics = NSTextField(labelWithString: "FOCUS —     SHARPNESS —     TRACKING —")
+    private let performance = NSTextField(labelWithString:"Performance measurements appear after camera connection.")
     private let minimum = NSTextField(string: "0"), maximum = NSTextField(string: "255")
     private let track = NSButton(checkboxWithTitle: "Track miniature movement", target: nil, action: nil)
     private var start: NSButton!, hold: NSButton!, reacquire: NSButton!, restore: NSButton!, connect: NSButton!
@@ -73,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildMenu()
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 850), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
         window.title = "MiniFocus — Painting Companion"
-        window.minSize = NSSize(width: 880, height: 740)
+        window.minSize = NSSize(width: 880, height: 780)
         window.delegate = self
         let root = NSView(); root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView = root
@@ -98,11 +99,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let limits = NSStackView(views: [track, NSTextField(labelWithString: "Search limits:"), minimum, NSTextField(labelWithString: "to"), maximum])
         limits.spacing = 10
         metrics.font = .monospacedSystemFont(ofSize: 12, weight: .medium); metrics.textColor = .secondaryLabelColor
+        performance.font = .monospacedSystemFont(ofSize:11,weight:.regular); performance.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 14, weight: .medium); status.maximumNumberOfLines = 3
         status.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
         let help = NSTextField(wrappingLabelWithString: "Draw a box and hold the mini steady for focus. If it leaves the frame, focus holds and following resumes when it returns.\nOBS: use the Logitech C930e as your Video Capture Device; leave native autofocus off. Hold pauses lens changes. Reacquire runs a full search. Search limits use lens units, not inches.")
         help.textColor = .secondaryLabelColor; help.font = .systemFont(ofSize: 12); help.maximumNumberOfLines = 4
-        let stack = NSStackView(views: [title, subtitle, preview, buttons, limits, metrics, status, help])
+        let stack = NSStackView(views: [title, subtitle, preview, buttons, limits, metrics, performance, status, help])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -119,6 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         preview.onSelection = { [weak self] in self?.engine.select($0) }
         engine.onUpdate = { [weak self] in self?.update($0) }
         engine.diagnostic = CommandLine.arguments.contains("--diagnose")
+        if let index = CommandLine.arguments.firstIndex(of:"--performance-log"), index+1 < CommandLine.arguments.count {
+            engine.performanceLogURL = URL(fileURLWithPath:CommandLine.arguments[index+1])
+        }
         update(CameraSnapshot())
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if engine.diagnostic { engine.connect() }
@@ -146,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         status.textColor = value.lost ? .systemOrange : .labelColor
         let mode = value.acquiring ? "ACQUIRING" : (value.lost ? "LOOKING FOR MINI" : (value.active ? "FOLLOWING" : "IDLE / HOLD"))
         metrics.stringValue = String(format: "FOCUS %d   ·   SHARPNESS %.1f   ·   TRACKING %.0f%%   ·   %@", value.focus, value.sharpness, Double(value.confidence)*100, mode)
+        performance.stringValue = value.performance
         if value.connected && !hadConnection { minimum.stringValue = "\(value.minimum)"; maximum.stringValue = "\(value.maximum)" }
         hadConnection = value.connected
         connect.title = value.connected ? "Reconnect" : "Connect"; connect.isEnabled = true

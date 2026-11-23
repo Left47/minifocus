@@ -40,13 +40,13 @@ Uncheck **Track miniature movement** to use a fixed focus region. This can be us
 
 ## OBS compatibility
 
-Both applications need access to the same camera frames. Direct simultaneous live preview was verified with MiniFocus and OBS on the development Mac. The recording test was blocked by an unavailable recording destination in OBS; recording verification remains outstanding. MiniFocus never seizes the USB interface from the camera driver. If either app shows no video, stop following, reconnect, and check camera permissions and matching capture settings. A future frame-sharing or OBS integration may be needed on systems where concurrent capture is unavailable.
+Both applications need access to the same camera frames. Simultaneous live preview and an 86.1-second coordinated 1080p/60 OBS recording were verified on the development Mac, with no additional OBS rendering misses or encoding skips. Recovery processing was slower and target identity still failed during rotation; see [the performance results](PERFORMANCE.md). MiniFocus never seizes the USB interface from the camera driver. If either app shows no video, stop following, reconnect, and check camera permissions and matching capture settings.
 
 MiniFocus's selection overlay is displayed only in its preview. It is not added to OBS's direct camera feed. Do not use window capture of MiniFocus as your recording source unless you want its controls and overlay in the recording.
 
 ## How focus works
 
-- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and normalized luminance correlation propose matches; Vision feature-print distances verify identity against positive and background references. Local multiscale matching handles size changes; persistent whole-frame re-identification handles exits and returns. Up to six confirmed appearances are kept in memory for the current selection. This is not a trained miniature detector.
+- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and luminance correlation propose matches at multiple roll angles; Vision feature-print references include 15-degree rotation increments. Confirmed new views can update the remembered appearances while background references continue to reject unrelated candidates. Local multiscale matching handles size changes; persistent whole-frame re-identification handles exits and returns. This is not a trained miniature detector, and reliable arbitrary three-dimensional rotation remains unfinished.
 - Initial acquisition holds the selected region fixed, avoiding tracking failures caused by deliberate defocus during the lens sweep. Tracking starts after the final lens position has settled.
 - The app computes luminance Laplacian variance inside the central 76% of the target, so surrounding desktop detail has less influence.
 - Focus search waits for lens settling and takes the median of three samples per position. Selection uses an expanding local bracket followed by finer sampling; Reacquire uses a full coarse scan and refinement. Following uses local probes with an improvement threshold to reduce drift.
@@ -69,17 +69,21 @@ bash scripts/test.sh --vision
 
 # Launch with console diagnostics for live frames and USB reads
 build/MiniFocus.app/Contents/MacOS/MiniFocus --diagnose
+
+# Also retain local performance counters without recording camera images
+build/MiniFocus.app/Contents/MacOS/MiniFocus --diagnose --performance-log "$PWD/build/performance-session.jsonl"
 ```
 
 Hardware tests intentionally move focus one increment and restore the original settings. Run them with MiniFocus stopped so two controllers do not compete.
 
-The Mac tests passed 122 algorithm checks, a native Vision feature-print enrollment/match/background-rejection test, USB focus write/readback/restore, and live 1920×1080 preview with USB access still available. Regression tests cover acquisition settling, multiscale recovery, return at a different frame location, two-observation confirmation, and identity distance gates. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. Concurrent OBS preview and the app's transition into following mode were observed. Initial color/shape recovery incorrectly selected background objects in practical testing; the stricter feature-print verification was added in response and still needs real painting validation. Optical performance across painting distances, exit/return recovery, and OBS recording verification remain under evaluation. No camera images or recordings are included in this repository.
+The Mac tests passed 130 algorithm checks and native Vision identity checks at 7°, 17°, 45°, 90°, 137°, 180°, 225°, 270°, and 345°, with background rejection checked at every angle. Hardware focus write/readback/restoration also passed. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. The coordinated OBS recording check passed without new rendering/encoding misses; real miniature rotation and recovery still lost the target. See [PERFORMANCE.md](PERFORMANCE.md) and [issue #1](https://github.com/Left47/minifocus/issues/1) for the evidence and remaining work. No camera images or recordings are included in this repository.
 
 ## Layout
 
 - `Sources/App.swift`: AppKit window, preview, region selection, and controls.
 - `Sources/CameraEngine.swift`: camera frames, tracking, focus workflow, and restoration.
 - `Sources/FocusLogic.swift`: geometry, sharpness measurement, and focus search.
+- `Sources/FramePerformance.swift`: bounded processing-time samples and capture-delivery counters.
 - `Sources/TargetAppearance.swift`: appearance checks and multiscale recovery.
 - `Sources/VisionIdentity.swift`: learned target/background image similarity verification.
 - `Sources/FocusUSB.c`: C930e USB camera-terminal controls through IOKit.

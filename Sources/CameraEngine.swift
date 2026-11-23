@@ -10,6 +10,7 @@ struct CameraSnapshot {
     var focus = 0, minimum = 0, maximum = 255, step = 5
     var sharpness = 0.0
     var confidence: Float = 0
+    var performance = "Performance measurements appear after camera connection."
     var connected = false, active = false, lost = false, acquiring = false, followingRequested = false
 }
 
@@ -42,6 +43,10 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var confirmation = ReacquisitionConfirmation()
     private let identity = VisionIdentity()
     private var lastIdentityCheck = 0.0
+    private var performance = FramePerformance(started:0)
+    private var lastPerformanceReport = 0.0
+    private var performanceFile: FileHandle?
+    var performanceLogURL: URL?
     var diagnostic = false
 
     private func publish() {
@@ -103,6 +108,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         snapshot.minimum = Int(original.minimum); snapshot.maximum = Int(original.maximum); snapshot.step = Int(original.step)
         lower = snapshot.minimum; upper = snapshot.maximum
         snapshot.connected = true
+        performance = FramePerformance(started:ProcessInfo.processInfo.systemUptime)
+        if let url = performanceLogURL {
+            if !FileManager.default.fileExists(atPath:url.path) { FileManager.default.createFile(atPath:url.path,contents:nil) }
+            performanceFile = try? FileHandle(forWritingTo:url)
+            _ = try? performanceFile?.seekToEnd()
+        }
         snapshot.message = "Waiting for camera frames…"
         lastFrameAt = ProcessInfo.processInfo.systemUptime
         observer = NotificationCenter.default.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] notification in
@@ -206,6 +217,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         queue.async { self.disconnectNow(); self.publish() }
     }
     private func disconnectNow() {
+        reportPerformance(at:ProcessInfo.processInfo.systemUptime)
+        try? performanceFile?.close(); performanceFile = nil
         restoreNow(); watchdog?.cancel(); watchdog = nil
         if let observer = observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
         session.stopRunning()
@@ -219,7 +232,16 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         let time = ProcessInfo.processInfo.systemUptime
         lastFrameAt = time
+        performance.receive(presentationTime:CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
         guard time - lastProcessed >= (acquiring ? 0.05 : 0.10), let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let mode = acquiring ? "acquisition" : (snapshot.lost ? "recovery" : (snapshot.active ? "following" : "preview"))
+        defer {
+            let finished = ProcessInfo.processInfo.systemUptime
+            performance.finish(mode:mode,milliseconds:(finished-time)*1000)
+            // Long identity enrollment is our work, not a disconnected camera.
+            lastFrameAt = finished
+            if finished-lastPerformanceReport >= 2 { reportPerformance(at:finished) }
+        }
         lastProcessed = time
         if snapshot.image == nil { snapshot.message = "Live preview ready. Drag a tight box around the miniature." }
         if time-lastPreviewAt >= 0.10 {
@@ -322,14 +344,17 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if let result = observed, TargetGeometry.acceptable(result.boundingBox, after: previous, confidence: result.confidence) {
             var rect = result.boundingBox
             let candidate = frame.signature(rect)
-            let match = appearance?.match(candidate)
-            let anchorColor = anchorAppearance?.match(candidate).color ?? 1
+            let match = appearance?.rotationMatch(candidate)
+            let anchorColor = anchorAppearance?.colorSimilarity(candidate) ?? 1
             var distinct = true
-            if sweep == nil && time-lastIdentityCheck >= 0.5 {
+            var identityVerified = false
+            if sweep == nil && (time-lastIdentityCheck >= 0.5 || (match?.score ?? 1) < 0.60) {
                 lastIdentityCheck = time
                 distinct = identity.accepts(buffer, rect: rect, learn: result.confidence > 0.9, at: time)
+                identityVerified = distinct
             }
-            if distinct && anchorColor >= 0.62 && (match == nil || (match!.color >= 0.62 && match!.correlation >= 0.25 && match!.score >= 0.60)) {
+            let appearanceMatches = match == nil || (match!.color >= 0.62 && match!.correlation >= 0.25 && match!.score >= 0.60)
+            if distinct && anchorColor >= 0.62 && (appearanceMatches || identityVerified) {
                 var adjusted = false
                 if let template = appearance, time-lastScaleCheck > 0.45 {
                     lastScaleCheck = time
@@ -342,7 +367,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 if adjusted { resetTracker(rect) } else { tracker?.inputObservation = result }
                 recoveringSince = nil
                 // Learn gradual pose changes only from strong appearance matches.
-                if result.confidence > 0.9, let match = match, match.score > 0.80, anchorColor > 0.8 {
+                if result.confidence > 0.85, identityVerified, anchorColor > 0.65 {
                     appearance = frame.signature(rect)
                     remember(frame.signature(rect), at: time)
                 }
@@ -358,8 +383,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 resetTracker(recovered.rect); recoveringSince = nil
                 // A close-up changes the target scale and often needs a larger
                 // lens adjustment than the ordinary local follow probes.
-                let ratio = recovered.rect.width / previous.width
-                if snapshot.active && (ratio > 1.2 || ratio < 0.8) { beginSweep(wide: true, at: time) }
+                let ratio = sqrt(recovered.rect.width*recovered.rect.height/(previous.width*previous.height))
+                if snapshot.active && (ratio > 1.4 || ratio < 0.7) { beginSweep(wide: true, at: time) }
                 snapshot.message = acquiring ? "Mini recovered • hold it inside the box while focus catches up" : (snapshot.active ? "Mini recovered • following" : "Mini recovered • holding focus")
                 return true
             }
@@ -375,7 +400,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func remember(_ candidate: TargetAppearance, at time: Double) {
         guard time-lastLibraryAt >= 0.8 || appearanceLibrary.isEmpty else { return }
         lastLibraryAt = time
-        if appearanceLibrary.contains(where: { $0.match(candidate).score > 0.96 }) { return }
+        if appearanceLibrary.contains(where: { $0.rotationMatch(candidate).score > 0.96 }) { return }
         appearanceLibrary.append(candidate)
         // Preserve the original reference while keeping a few more recent poses.
         if appearanceLibrary.count > 6 { appearanceLibrary.remove(at: 1) }
@@ -421,5 +446,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         guard let usb = usb else { return false }
         var position: Int32 = 0, automatic: Int32 = 0
         return focus_read(usb, &position, &automatic) != 0
+    }
+    func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection:AVCaptureConnection) {
+        performance.drop()
+    }
+    private func reportPerformance(at time:Double) {
+        lastPerformanceReport = time; snapshot.performance = performance.summary
+        let report = performance.report(at:time)
+        guard let data = try? JSONSerialization.data(withJSONObject:report,options:[.sortedKeys]) else { return }
+        if diagnostic { print("PERFORMANCE \(String(decoding:data,as:UTF8.self))"); fflush(stdout) }
+        if let file = performanceFile { try? file.write(contentsOf:data+Data([10])) }
     }
 }
