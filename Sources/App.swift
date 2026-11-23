@@ -180,6 +180,7 @@ enum MiniFocusApplication {
         let delegate = AppDelegate()
         app.setActivationPolicy(.regular)
         app.delegate = delegate
-        app.run()
+        // NSApplication's delegate is weak; retain the controller for the event loop.
+        withExtendedLifetime(delegate) { app.run() }
     }
 }

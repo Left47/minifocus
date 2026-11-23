@@ -78,7 +78,10 @@ struct AppearanceFrame {
     // A coarse whole-frame search followed by local refinement. The stored
     // appearances survive off-screen periods; no lens writes happen here.
     func reidentify(_ templates: [TargetAppearance], reference: CGRect, originalSize: CGSize) -> (rect: CGRect, score: Double)? {
-        guard !templates.isEmpty else { return nil }
+        reidentificationCandidates(templates, reference: reference, originalSize: originalSize).first
+    }
+    func reidentificationCandidates(_ templates: [TargetAppearance], reference: CGRect, originalSize: CGSize) -> [(rect: CGRect, score: Double)] {
+        guard !templates.isEmpty else { return [] }
         var proposals: [(rect: CGRect, score: Double, template: Int)] = []
         var sizes: [CGSize] = []
         for base in [reference.size, originalSize] {
@@ -98,6 +101,10 @@ struct AppearanceFrame {
                         let match = template.match(candidate)
                         guard match.color >= 0.62, match.correlation >= 0.12, match.score >= 0.52 else { continue }
                         if proposals.count < 12 || match.score > proposals.last!.score {
+                            if let duplicate = proposals.firstIndex(where: { overlap(rect,$0.rect) > 0.55 }) {
+                                if proposals[duplicate].score >= match.score { continue }
+                                proposals.remove(at: duplicate)
+                            }
                             proposals.append((rect,match.score,index)); proposals.sort { $0.score > $1.score }
                             if proposals.count > 12 { proposals.removeLast() }
                         }
@@ -105,12 +112,17 @@ struct AppearanceFrame {
                 }
             }
         }
-        var best: (rect: CGRect, score: Double)?
+        var results: [(rect: CGRect, score: Double)] = []
         for proposal in proposals {
             if let refined = locate(templates[proposal.template], around: proposal.rect, broad: false), refined.score >= 0.72,
-               refined.score > (best?.score ?? 0) { best = refined }
+               !results.contains(where: { overlap(refined.rect,$0.rect) > 0.55 }) { results.append(refined) }
         }
-        return best
+        return results.sorted { $0.score > $1.score }
+    }
+    private func overlap(_ a: CGRect, _ b: CGRect) -> Double {
+        let intersection = a.intersection(b)
+        if intersection.isNull { return 0 }
+        return intersection.width*intersection.height/max(0.0001,min(a.width*a.height,b.width*b.height))
     }
 }
 

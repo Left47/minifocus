@@ -12,8 +12,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test focus logic
-        run: bash scripts/test.sh
+      - name: Test focus logic and native image identity
+        run: bash scripts/test.sh --vision
       - name: Build native application
         run: bash scripts/build.sh
       - name: Package application

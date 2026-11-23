@@ -40,6 +40,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var originalSelectionSize = CGSize.zero
     private var lastLibraryAt = 0.0, lastGlobalSearch = 0.0
     private var confirmation = ReacquisitionConfirmation()
+    private let identity = VisionIdentity()
+    private var lastIdentityCheck = 0.0
     var diagnostic = false
 
     private func publish() {
@@ -52,9 +54,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         sweep = nil; acquisition.cancel(); snapshot.active = false; followRequested = false; snapshot.message = message; publish()
     }
     func connect() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let authorization = AVCaptureDevice.authorizationStatus(for: .video)
+        if diagnostic { print("DIAGNOSTIC camera authorization: \(authorization.rawValue)"); fflush(stdout) }
+        switch authorization {
         case .authorized: queue.async { self.configure() }
         case .notDetermined:
+            queue.async { self.snapshot.message = "Allow MiniFocus camera access in the macOS permission prompt."; self.publish() }
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 self.queue.async {
                     if granted { self.configure() }
@@ -66,6 +71,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
     private func configure() {
         guard usb == nil else { return }
+        snapshot.message = "Connecting to C930e camera controls…"; publish()
         var error = [CChar](repeating: 0, count: 512)
         guard let handle = focus_open(&original, &error, Int32(error.count)) else { fail(String(cString: error)); return }
         usb = handle
@@ -123,6 +129,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             self.snapshot.target = rectangle; self.snapshot.lost = false; self.snapshot.confidence = 1
             self.appearance = nil; self.anchorAppearance = nil; self.recoveringSince = nil
             self.appearanceLibrary = []; self.originalSelectionSize = rectangle.size; self.confirmation.reset()
+            self.identity.reset()
             self.resetTracker(rectangle)
             self.startNow(wide: true, minimum: self.lower, maximum: self.upper, exhaustive: false)
             self.publish()
@@ -187,6 +194,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func restoreNow() {
         snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil; followRequested = false
         snapshot.target = nil; snapshot.lost = false; appearanceLibrary = []; appearance = nil; anchorAppearance = nil; tracker = nil
+        identity.reset()
         guard let usb = usb else { return }
         if focus_restore(usb) != 0 {
             var position: Int32 = 0, automatic: Int32 = 0
@@ -227,6 +235,14 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let frame = makeAppearanceFrame(buffer)
             if sweep == nil, acquisition.releaseIfSettled(at: time) {
                 resetTracker(previous)
+                if !identity.ready {
+                    snapshot.message = "Learning miniature identity and background…"; publish()
+                    let learned = identity.enroll(buffer, rect: previous)
+                    lastFrameAt = ProcessInfo.processInfo.systemUptime
+                    if !learned {
+                        holdForLoss("Could not learn a distinct miniature reference. Draw a tighter box and try again."); return
+                    }
+                }
                 appearance = frame.signature(previous)
                 if anchorAppearance == nil { anchorAppearance = appearance }
                 remember(frame.signature(previous), at: time)
@@ -296,7 +312,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
     private func track(buffer: CVPixelBuffer, frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
         if snapshot.lost || recoveringSince != nil {
-            return recover(frame: frame, previous: previous, at: time)
+            return recover(buffer: buffer, frame: frame, previous: previous, at: time)
         }
         var observed: VNDetectedObjectObservation?
         if let tracker = tracker {
@@ -308,11 +324,17 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let candidate = frame.signature(rect)
             let match = appearance?.match(candidate)
             let anchorColor = anchorAppearance?.match(candidate).color ?? 1
-            if anchorColor >= 0.58 && (match == nil || (match!.color >= 0.58 && match!.score >= 0.48)) {
+            var distinct = true
+            if sweep == nil && time-lastIdentityCheck >= 0.5 {
+                lastIdentityCheck = time
+                distinct = identity.accepts(buffer, rect: rect, learn: result.confidence > 0.9, at: time)
+            }
+            if distinct && anchorColor >= 0.62 && (match == nil || (match!.color >= 0.62 && match!.correlation >= 0.25 && match!.score >= 0.60)) {
                 var adjusted = false
                 if let template = appearance, time-lastScaleCheck > 0.45 {
                     lastScaleCheck = time
-                    if let better = frame.locate(template, around: rect, broad: false), better.score > (match?.score ?? 0)+0.055 {
+                    if let better = frame.locate(template, around: rect, broad: false), better.score > (match?.score ?? 0)+0.055,
+                       identity.accepts(buffer, rect: better.rect) {
                         rect = better.rect; adjusted = true
                     }
                 }
@@ -320,7 +342,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 if adjusted { resetTracker(rect) } else { tracker?.inputObservation = result }
                 recoveringSince = nil
                 // Learn gradual pose changes only from strong appearance matches.
-                if result.confidence > 0.85, let match = match, match.score > 0.70, anchorColor > 0.72 {
+                if result.confidence > 0.9, let match = match, match.score > 0.80, anchorColor > 0.8 {
                     appearance = frame.signature(rect)
                     remember(frame.signature(rect), at: time)
                 }
@@ -330,14 +352,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if let template = appearance, time-lastRecoveryAttempt > 0.18 {
             lastRecoveryAttempt = time
             if let recovered = frame.locate(template, around: previous, broad: true),
-               (anchorAppearance?.match(frame.signature(recovered.rect)).color ?? 1) >= 0.60 {
+               (anchorAppearance?.match(frame.signature(recovered.rect)).color ?? 1) >= 0.65,
+               identity.accepts(buffer, rect: recovered.rect) {
                 snapshot.target = recovered.rect; snapshot.confidence = Float(recovered.score)
                 resetTracker(recovered.rect); recoveringSince = nil
                 // A close-up changes the target scale and often needs a larger
                 // lens adjustment than the ordinary local follow probes.
                 let ratio = recovered.rect.width / previous.width
                 if snapshot.active && (ratio > 1.2 || ratio < 0.8) { beginSweep(wide: true, at: time) }
-                snapshot.message = acquiring ? "Mini recovered • hold it inside the box while focus catches up" : "Mini recovered • following"
+                snapshot.message = acquiring ? "Mini recovered • hold it inside the box while focus catches up" : (snapshot.active ? "Mini recovered • following" : "Mini recovered • holding focus")
                 return true
             }
         }
@@ -357,7 +380,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         // Preserve the original reference while keeping a few more recent poses.
         if appearanceLibrary.count > 6 { appearanceLibrary.remove(at: 1) }
     }
-    private func recover(frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
+    private func recover(buffer: CVPixelBuffer, frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
         guard !appearanceLibrary.isEmpty else {
             snapshot.message = "Draw a new box to establish a focused miniature reference."; return false
         }
@@ -367,12 +390,17 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         lastGlobalSearch = time
         var best: (rect: CGRect, score: Double)?
         for template in appearanceLibrary {
-            if let local = frame.locate(template, around: previous, broad: true), local.score > (best?.score ?? 0) { best = local }
+            if let local = frame.locate(template, around: previous, broad: true), local.score > (best?.score ?? 0),
+               (anchorAppearance?.match(frame.signature(local.rect)).color ?? 1) >= 0.65,
+               identity.accepts(buffer, rect: local.rect) { best = local }
         }
         if best == nil {
-            best = frame.reidentify(appearanceLibrary, reference: previous, originalSize: originalSelectionSize)
+            let candidates = frame.reidentificationCandidates(appearanceLibrary, reference: previous, originalSize: originalSelectionSize)
+            best = candidates.prefix(6).first {
+                (anchorAppearance?.match(frame.signature($0.rect)).color ?? 1) >= 0.65 && identity.accepts(buffer, rect: $0.rect)
+            }
         }
-        if let best = best, (anchorAppearance?.match(frame.signature(best.rect)).color ?? 1) >= 0.60 {
+        if let best = best {
             snapshot.message = "Mini spotted • confirming it before moving focus"
             guard confirmation.observe(best.rect, at: time) else { return false }
             snapshot.target = best.rect; snapshot.confidence = Float(best.score); snapshot.lost = false

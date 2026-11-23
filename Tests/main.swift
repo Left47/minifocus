@@ -6,6 +6,11 @@ func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     checks += 1
     if !condition() { fatalError("FAIL: \(message)") }
 }
+check(IdentityDecision.accepts(positive: 0.1, negative: 0.9, separation: 0.8), "Strong miniature identity is accepted")
+check(!IdentityDecision.accepts(positive: 0.4, negative: 0.3, separation: 0.8), "Background-like candidate is rejected despite appearance match")
+check(!IdentityDecision.accepts(positive: 0.6, negative: 0.9, separation: 0.8), "Candidate too far from the learned miniature is rejected")
+check(!IdentityDecision.accepts(positive: 0.3, negative: 0.35, separation: 0.8), "Ambiguous identity stays in looking mode")
+check(!IdentityDecision.accepts(positive: 0, negative: 0, separation: 0), "Missing identity calibration cannot enable autofocus recovery")
 func simulate(current: Int, wide: Bool, peak: Int?, noisy: Bool = false, exhaustive: Bool = false, onProbe: ((Int) -> Void)? = nil) -> Int {
     let sweep = FocusSweep(current: current, minimum: 0, maximum: 255, step: 5, wide: wide, exhaustive: exhaustive)
     var time = 0.0, position = current, frames = 0

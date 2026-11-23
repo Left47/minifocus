@@ -1,6 +1,14 @@
 import Foundation
 import CoreGraphics
 
+enum IdentityDecision {
+    static func accepts(positive: Double, negative: Double, separation: Double) -> Bool {
+        guard positive.isFinite, negative.isFinite, separation.isFinite, separation > 0 else { return false }
+        // Relative distances avoid assuming the numeric scale of a Vision revision.
+        return positive < separation*0.65 && positive < negative*0.72
+    }
+}
+
 // The tracker must not consume deliberately blurred frames during acquisition.
 struct AcquisitionGate {
     private(set) var isAcquiring = false
