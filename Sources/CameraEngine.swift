@@ -32,6 +32,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var watchdog: DispatchSourceTimer?
     private var observer: NSObjectProtocol?
     private var diagnosticFrames = 0
+    private var appearance: TargetAppearance?, anchorAppearance: TargetAppearance?
+    private var recoveringSince: Double?, lastRecoveryAttempt = 0.0, lastScaleCheck = 0.0
+    private var lastPreviewAt = 0.0
     var diagnostic = false
 
     private func publish() {
@@ -111,8 +114,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             guard self.snapshot.connected else { return }
             self.pauseAtStable()
             self.snapshot.target = rectangle; self.snapshot.lost = false; self.snapshot.confidence = 1
+            self.appearance = nil; self.anchorAppearance = nil; self.recoveringSince = nil
             self.resetTracker(rectangle)
-            self.startNow(wide: true, minimum: self.lower, maximum: self.upper)
+            self.startNow(wide: true, minimum: self.lower, maximum: self.upper, exhaustive: false)
             self.publish()
         }
     }
@@ -128,9 +132,9 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
     }
     func start(wide: Bool, minimum: Int, maximum: Int) {
-        queue.async { self.startNow(wide: wide, minimum: minimum, maximum: maximum) }
+        queue.async { self.startNow(wide: wide, minimum: minimum, maximum: maximum, exhaustive: wide) }
     }
-    private func startNow(wide: Bool, minimum: Int, maximum: Int) {
+    private func startNow(wide: Bool, minimum: Int, maximum: Int, exhaustive: Bool) {
             guard let usb = self.usb, self.snapshot.target != nil, !self.snapshot.lost,
                   ProcessInfo.processInfo.systemUptime - self.lastFrameAt < 2 else { return }
             let step = self.snapshot.step, hardwareMin = self.snapshot.minimum
@@ -143,7 +147,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let clamped = min(max(self.snapshot.focus, minimum), maximum)
             guard self.move(to: clamped) else { return }
             self.stableFocus = clamped; self.snapshot.active = true
-            self.beginSweep(wide: wide, at: ProcessInfo.processInfo.systemUptime)
+            self.beginSweep(wide: wide, at: ProcessInfo.processInfo.systemUptime, exhaustive: exhaustive)
             self.publish()
     }
     private func move(to position: Int) -> Bool {
@@ -152,15 +156,15 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
         snapshot.focus = position; return true
     }
-    private func beginSweep(wide: Bool, at time: Double) {
-        let search = FocusSweep(current: snapshot.focus, minimum: lower, maximum: upper, step: snapshot.step, wide: wide)
+    private func beginSweep(wide: Bool, at time: Double, exhaustive: Bool = false) {
+        let search = FocusSweep(current: snapshot.focus, minimum: lower, maximum: upper, step: snapshot.step, wide: wide, exhaustive: exhaustive)
         sweep = search; search.didMove(at: time)
         if wide { acquisition.begin() } else { acquisition.cancel() }
         snapshot.message = wide ? "Acquiring focus… hold the mini inside the fixed box until the search finishes." : "Following miniature • checking focus inside your selection"
     }
     private func pauseAtStable() {
         if snapshot.active, sweep != nil, snapshot.focus != stableFocus { _ = move(to: stableFocus) }
-        snapshot.active = false; sweep = nil; acquisition.cancel()
+        snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil
     }
     func hold() {
         queue.async { self.pauseAtStable(); self.snapshot.message = "Holding focus. Click Start following to resume."; self.publish() }
@@ -172,7 +176,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         queue.async { self.restoreNow(); self.publish() }
     }
     private func restoreNow() {
-        snapshot.active = false; sweep = nil; acquisition.cancel()
+        snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil
         guard let usb = usb else { return }
         if focus_restore(usb) != 0 {
             var position: Int32 = 0, automatic: Int32 = 0
@@ -197,32 +201,30 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         let time = ProcessInfo.processInfo.systemUptime
         lastFrameAt = time
-        guard time - lastProcessed >= 0.10, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard time - lastProcessed >= (acquiring ? 0.05 : 0.10), let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastProcessed = time
         if snapshot.image == nil { snapshot.message = "Live preview ready. Drag a tight box around the miniature." }
-        let image = CIImage(cvPixelBuffer: buffer)
-        snapshot.image = context.createCGImage(image, from: image.extent)
+        if time-lastPreviewAt >= 0.10 {
+            lastPreviewAt = time
+            let image = CIImage(cvPixelBuffer: buffer)
+            snapshot.image = context.createCGImage(image, from: image.extent)
+        }
         if diagnostic {
             diagnosticFrames += 1
             if diagnosticFrames == 30 { print("DIAGNOSTIC PASS: received 30 analyzed frames; \(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer)); USB control still readable=\(checkUSB())"); fflush(stdout) }
         }
         if let previous = snapshot.target, !snapshot.lost {
+            let frame = makeAppearanceFrame(buffer)
             if sweep == nil, acquisition.releaseIfSettled(at: time) {
                 resetTracker(previous)
+                appearance = frame.signature(previous)
+                if anchorAppearance == nil { anchorAppearance = appearance }
                 snapshot.message = "Following miniature • focus settled"
             }
             // Deliberate lens sweeps blur the tracker input. Acquire using the
             // selected fixed region, then initialize tracking from the sharp frame.
-            if wantsTracking, !acquiring, let tracker = tracker {
-                do {
-                    try sequence.perform([tracker], on: buffer, orientation: .up)
-                    guard let result = tracker.results?.first as? VNDetectedObjectObservation,
-                          TargetGeometry.acceptable(result.boundingBox, after: previous, confidence: result.confidence) else {
-                        holdForLoss("Target lost or obscured. Focus held; draw a new box to resume."); return
-                    }
-                    snapshot.target = result.boundingBox; snapshot.confidence = result.confidence
-                    tracker.inputObservation = result
-                } catch { holdForLoss("Tracking interrupted. Focus held; draw a new box to resume."); return }
+            if wantsTracking, !acquiring {
+                if !track(buffer: buffer, frame: frame, previous: previous, at: time) { publish(); return }
             }
             if let rect = snapshot.target {
                 CVPixelBufferLockBaseAddress(buffer, .readOnly)
@@ -263,6 +265,76 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             }
         }
         publish()
+    }
+    private func makeAppearanceFrame(_ buffer: CVPixelBuffer) -> AppearanceFrame {
+        let width = 320, height = max(1, CVPixelBufferGetHeight(buffer)*320/CVPixelBufferGetWidth(buffer))
+        var rgb = [UInt8](repeating: 0, count: width*height*3)
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        if let address = CVPixelBufferGetBaseAddress(buffer) {
+            let bytes = address.assumingMemoryBound(to: UInt8.self), rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+            for y in 0..<height {
+                let sourceRow = y*CVPixelBufferGetHeight(buffer)/height*rowBytes
+                for x in 0..<width {
+                    let source = sourceRow + x*CVPixelBufferGetWidth(buffer)/width*4, target = (y*width+x)*3
+                    rgb[target] = bytes[source+2]; rgb[target+1] = bytes[source+1]; rgb[target+2] = bytes[source]
+                }
+            }
+        }
+        return AppearanceFrame(width: width, height: height, rgb: rgb)
+    }
+    private func track(buffer: CVPixelBuffer, frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
+        var observed: VNDetectedObjectObservation?
+        if let tracker = tracker {
+            do { try sequence.perform([tracker], on: buffer, orientation: .up); observed = tracker.results?.first as? VNDetectedObjectObservation }
+            catch { observed = nil }
+        }
+        if let result = observed, TargetGeometry.acceptable(result.boundingBox, after: previous, confidence: result.confidence) {
+            var rect = result.boundingBox
+            let candidate = frame.signature(rect)
+            let match = appearance?.match(candidate)
+            let anchorColor = anchorAppearance?.match(candidate).color ?? 1
+            if anchorColor >= 0.58 && (match == nil || (match!.color >= 0.58 && match!.score >= 0.48)) {
+                var adjusted = false
+                if let template = appearance, time-lastScaleCheck > 0.45 {
+                    lastScaleCheck = time
+                    if let better = frame.locate(template, around: rect, broad: false), better.score > (match?.score ?? 0)+0.055 {
+                        rect = better.rect; adjusted = true
+                    }
+                }
+                snapshot.target = rect; snapshot.confidence = result.confidence
+                if adjusted { resetTracker(rect) } else { tracker?.inputObservation = result }
+                recoveringSince = nil
+                // Learn gradual pose changes only from strong appearance matches.
+                if result.confidence > 0.85, let match = match, match.score > 0.70, anchorColor > 0.72 {
+                    appearance = frame.signature(rect)
+                }
+                return true
+            }
+        }
+        if let template = appearance, time-lastRecoveryAttempt > 0.18 {
+            lastRecoveryAttempt = time
+            if let recovered = frame.locate(template, around: previous, broad: true),
+               (anchorAppearance?.match(frame.signature(recovered.rect)).color ?? 1) >= 0.60 {
+                snapshot.target = recovered.rect; snapshot.confidence = Float(recovered.score)
+                resetTracker(recovered.rect); recoveringSince = nil
+                // A close-up changes the target scale and often needs a larger
+                // lens adjustment than the ordinary local follow probes.
+                let ratio = recovered.rect.width / previous.width
+                if snapshot.active && (ratio > 1.2 || ratio < 0.8) { beginSweep(wide: true, at: time) }
+                snapshot.message = acquiring ? "Mini recovered • hold it inside the box while focus catches up" : "Mini recovered • following"
+                return true
+            }
+        }
+        if recoveringSince == nil {
+            if snapshot.active, snapshot.focus != stableFocus { _ = move(to: stableFocus) }
+            sweep = nil; recoveringSince = time
+        }
+        snapshot.confidence = 0
+        if time-(recoveringSince ?? time) > 1.8 {
+            holdForLoss("Mini could not be recovered. Focus held; draw a new box to resume.")
+        } else { snapshot.message = "Recovering miniature • holding focus and rejecting other subjects" }
+        return false
     }
     private func checkUSB() -> Bool {
         guard let usb = usb else { return false }

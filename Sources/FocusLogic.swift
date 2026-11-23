@@ -60,18 +60,23 @@ final class FocusSweep {
     private var scores: [Int: Double] = [:]
     private var readyAt: Double = 0
     private var refine: Bool
+    private let exhaustive: Bool
+    private var extending: Bool
     private var coarseStep: Int
     let settleTime: Double
     var target: Int { candidates[index] }
 
-    init(current: Int, minimum: Int, maximum: Int, step: Int, wide: Bool, settleTime: Double = 0.30) {
+    init(current: Int, minimum: Int, maximum: Int, step: Int, wide: Bool, exhaustive: Bool = false, settleTime: Double = 0.18) {
         self.minimum = minimum; self.maximum = maximum; self.step = step; self.origin = current
-        self.settleTime = settleTime; refine = wide
-        coarseStep = max(step, ((maximum - minimum) / 10 / step) * step)
-        if wide {
+        self.settleTime = settleTime; refine = wide; self.exhaustive = exhaustive; extending = wide && !exhaustive
+        coarseStep = exhaustive ? max(step, ((maximum - minimum) / 10 / step) * step) : step * 4
+        if wide && exhaustive {
             candidates = Array(Set([current, minimum, maximum] + Array(stride(from: minimum, through: maximum, by: coarseStep)))).sorted()
             // Measure current focus before deliberately blurring the picture.
             candidates.removeAll { $0 == current }; candidates.insert(current, at: 0)
+        } else if wide {
+            candidates = Array(Set([current, max(minimum, current-coarseStep), min(maximum, current+coarseStep)]))
+            candidates.sort { abs($0-current) == abs($1-current) ? $0 < $1 : abs($0-current) < abs($1-current) }
         } else {
             candidates = [current, current-step*2, current-step, current+step, current+step*2].filter { $0 >= minimum && $0 <= maximum }
         }
@@ -87,6 +92,15 @@ final class FocusSweep {
             if lhs.value == rhs.value { return abs(lhs.key-origin) > abs(rhs.key-origin) }
             return lhs.value < rhs.value
         }!
+        if extending {
+            let lo = scores.keys.min()!, hi = scores.keys.max()!
+            let next: Int?
+            if best.key == lo && lo > minimum { next = max(minimum, lo-coarseStep) }
+            else if best.key == hi && hi < maximum { next = min(maximum, hi+coarseStep) }
+            else { next = nil }
+            if let next = next { candidates = [next]; index = 0; samples = []; return .move(next) }
+            extending = false
+        }
         if refine {
             refine = false
             candidates = Array(stride(from: max(minimum, best.key-coarseStep), through: min(maximum, best.key+coarseStep), by: step)).filter { scores[$0] == nil }

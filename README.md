@@ -26,13 +26,13 @@ The build script creates a locally ad-hoc-signed app for your Mac's architecture
 
 1. Open MiniFocus and click **Connect**. Grant camera permission if prompted.
 2. Draw a tight box around the miniature, excluding the base, fingers, palette, and background where possible.
-3. **Keep the miniature inside the fixed box during the initial focus search.** Selection automatically acquires focus. The lens scans the allowed range, refines around the sharpest position, then starts tracking from the focused image. A full-range search can take approximately 10–20 seconds.
+3. **Keep the miniature inside the fixed box during the initial focus search.** Selection automatically acquires focus. A quick search probes around the current lens position, expands toward improving sharpness, refines the best position, then starts tracking from the focused image. Nearby focus typically needs fewer probes than a full-range scan.
 4. In OBS, add or select a **Video Capture Device** source and choose **Logitech Webcam C930e**. Use 1920×1080 where available. Leave native autofocus off and close competing camera-settings applications.
-5. Leave MiniFocus open while recording. Once acquisition completes, move the miniature gradually; local focus checks follow smaller distance changes. Use **Reacquire** for a large distance change and hold the miniature inside the box again.
+5. Leave MiniFocus open while recording. Once acquisition completes, move the miniature gradually; local focus checks follow smaller distance changes. If quick acquisition misses, use **Reacquire** for a slower full-range scan and hold the miniature inside the box again.
 
 **Hold** pauses lens changes at the last settled focus. **Start following** resumes local checks. **Stop & restore**, reconnecting, and normal app quit restore the focus and autofocus settings captured when you connected. A crash, force quit, or unplug can prevent restoration; use your camera settings app if necessary.
 
-If tracking becomes uncertain, the app stops following and returns to the last settled lens position. Draw a new box to acquire again. The tracker follows visual appearance; it does not recognize miniatures semantically, and some occlusions may escape the confidence checks.
+If tracking becomes uncertain, the app holds the last settled lens position and tries to recover the miniature for up to 1.8 seconds. Recovery searches nearby positions and scales using color and shape, helping it reject unrelated subjects such as a nearby face. A recovered close-up triggers quick focus acquisition. If recovery fails, draw a new box. The tracker follows visual appearance; it does not recognize miniatures semantically, and some occlusions may escape the checks.
 
 Uncheck **Track miniature movement** to use a fixed focus region. This can be useful if you keep the mini in one part of the frame or tracking struggles with its appearance.
 
@@ -46,12 +46,12 @@ MiniFocus's selection overlay is displayed only in its preview. It is not added 
 
 ## How focus works
 
-- Apple's Vision object tracker updates the selected region, with confidence, motion, size, and frame-boundary checks.
+- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and normalized luminance correlation help reject switches to other subjects. Local multiscale template matching handles size changes and brief tracking failures; this is not a semantic miniature detector.
 - Initial acquisition holds the selected region fixed, avoiding tracking failures caused by deliberate defocus during the lens sweep. Tracking starts after the final lens position has settled.
 - The app computes luminance Laplacian variance inside the central 76% of the target, so surrounding desktop detail has less influence.
-- Focus search waits for lens settling and takes the median of three samples per position. Initial acquisition uses a coarse scan followed by finer sampling. Following uses local probes with an improvement threshold to reduce drift.
+- Focus search waits for lens settling and takes the median of three samples per position. Selection uses an expanding local bracket followed by finer sampling; Reacquire uses a full coarse scan and refinement. Following uses local probes with an improvement threshold to reduce drift.
 - USB writes are range-checked and read back. Camera interruptions and external focus changes stop following.
-- Preview and analysis run at approximately 10 fps; the capture session requests 1080p. OBS's own capture and recording settings remain separate.
+- Preview and tracking run at approximately 10 fps, with faster sharpness sampling during acquisition; the capture session requests 1080p. OBS's own capture and recording settings remain separate.
 
 All image processing happens locally. The app has no networking, recording, microphone capture, or image-upload features.
 
@@ -70,13 +70,14 @@ build/MiniFocus.app/Contents/MacOS/MiniFocus --diagnose
 
 Hardware tests intentionally move focus one increment and restore the original settings. Run them with MiniFocus stopped so two controllers do not compete.
 
-The Mac tests passed 86 algorithm checks, USB focus write/readback/restore, and live 1920×1080 preview with USB access still available. Initial acquisition now defers tracking through the sweep and final settling, with regression coverage for that behavior. Concurrent OBS preview and the app's transition into following mode were observed; optical performance across painting distances and OBS recording verification are still under evaluation. No camera images or recordings are included in this repository.
+The Mac tests passed 109 algorithm checks, USB focus write/readback/restore, and live 1920×1080 preview with USB access still available. Regression tests cover acquisition settling, multiscale recovery, and rejection of an unrelated skin-colored distractor. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. Concurrent OBS preview and the app's transition into following mode were observed; optical performance across painting distances and OBS recording verification are still under evaluation. No camera images or recordings are included in this repository.
 
 ## Layout
 
 - `Sources/App.swift`: AppKit window, preview, region selection, and controls.
 - `Sources/CameraEngine.swift`: camera frames, tracking, focus workflow, and restoration.
 - `Sources/FocusLogic.swift`: geometry, sharpness measurement, and focus search.
+- `Sources/TargetAppearance.swift`: appearance checks and multiscale recovery.
 - `Sources/FocusUSB.c`: C930e USB camera-terminal controls through IOKit.
 - `Tests/`: deterministic focus logic tests and opt-in physical camera checks.
 - `focus_probe.c`: standalone focus probe used during the initial hardware investigation.
