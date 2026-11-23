@@ -32,7 +32,7 @@ The build script creates a locally ad-hoc-signed app for your Mac's architecture
 
 **Hold** pauses lens changes at the last settled focus. **Start following** resumes local checks. **Stop & restore**, reconnecting, and normal app quit restore the focus and autofocus settings captured when you connected. A crash, force quit, or unplug can prevent restoration; use your camera settings app if necessary.
 
-If tracking becomes uncertain or the miniature leaves the frame, the app holds the last settled lens position and keeps looking. Recovery checks nearby positions and scales, then searches across the whole frame using several remembered views of the miniature. Apple's Vision feature prints compare proposed matches with the selected miniature and sampled background regions; a candidate must resemble the miniature more closely than the background and remain consistent across two observations before focus changes resume. A recovered target triggers quick focus acquisition. No new box is needed for an ordinary exit and return; draw a new one to change targets or replace the learned reference. This is image matching rather than a trained miniature detector; an unseen pose, severe blur, or similar-looking object can still defeat recovery.
+For a distinctly painted mini, the app learns paint cues and surrounding negative examples, then follows visible painted regions through rotation and partial obstruction. Hands are expected; no face is required. The focus box may shrink to an exposed painted part. When the mini disappears, the app holds focus and keeps looking, then confirms its return across frames before resuming focus changes. Indistinct or neutral-only targets use the existing image-identity fallback. Keep the camera fixed after selection; see [the first-pass validation and limits](REPLAY.md).
 
 Uncheck **Track miniature movement** to use a fixed focus region. This can be useful if you keep the mini in one part of the frame or tracking struggles with its appearance.
 
@@ -46,7 +46,7 @@ MiniFocus's selection overlay is displayed only in its preview. It is not added 
 
 ## How focus works
 
-- Apple's Vision object tracker updates the selected region, with confidence, motion, size, frame-boundary, and appearance checks. Color histograms and luminance correlation propose matches at multiple roll angles; Vision feature-print references include 15-degree rotation increments. Confirmed new views can update the remembered appearances while background references continue to reject unrelated candidates. Local multiscale matching handles size changes; persistent whole-frame re-identification handles exits and returns. This is not a trained miniature detector, and reliable arbitrary three-dimensional rotation remains unfinished.
+- A foreground paint model tracks coherent visible target regions and rejects unchanged scene regions, with surrounding samples reducing confusion with fingers and grips. Temporal confirmation and continuity guard recovery. When suitable paint cues are unavailable, Vision tracking, rotation-aware shape matching, and feature-print identity checks remain the fallback. This is not a trained miniature detector, and reliable arbitrary three-dimensional rotation remains unfinished.
 - Initial acquisition holds the selected region fixed, avoiding tracking failures caused by deliberate defocus during the lens sweep. Tracking starts after the final lens position has settled.
 - The app computes luminance Laplacian variance inside the central 76% of the target, so surrounding desktop detail has less influence.
 - Focus search waits for lens settling and takes the median of three samples per position. Selection uses an expanding local bracket followed by finer sampling; Reacquire uses a full coarse scan and refinement. Following uses local probes with an improvement threshold to reduce drift.
@@ -76,7 +76,7 @@ build/MiniFocus.app/Contents/MacOS/MiniFocus --diagnose --performance-log "$PWD/
 
 Hardware tests intentionally move focus one increment and restore the original settings. Run them with MiniFocus stopped so two controllers do not compete.
 
-The Mac tests passed 130 algorithm checks and native Vision identity checks at 7°, 17°, 45°, 90°, 137°, 180°, 225°, 270°, and 345°, with background rejection checked at every angle. Hardware focus write/readback/restoration also passed. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. The coordinated OBS recording check passed without new rendering/encoding misses; real miniature rotation and recovery still lost the target. See [PERFORMANCE.md](PERFORMANCE.md) and [issue #1](https://github.com/Left47/minifocus/issues/1) for the evidence and remaining work. No camera images or recordings are included in this repository.
+The Mac tests pass 152 algorithm checks and native Vision identity checks at 7°, 17°, 45°, 90°, 137°, 180°, 225°, 270°, and 345°. Nine reviewed checkpoints in a local replay of the previous movement recording pass with the new foreground tracker; new live validation is pending. Hardware focus write/readback/restoration also passed previously. A synthetic nearby-focus case needed 8 lens probes for quick acquisition versus 19 for the full scan. The previous coordinated OBS recording had no new rendering/encoding misses but lost the mini during rotation. See [REPLAY.md](REPLAY.md), [PERFORMANCE.md](PERFORMANCE.md), and [issue #1](https://github.com/Left47/minifocus/issues/1). No camera images or recordings are included in this repository.
 
 ## Layout
 
@@ -85,6 +85,7 @@ The Mac tests passed 130 algorithm checks and native Vision identity checks at 7
 - `Sources/FocusLogic.swift`: geometry, sharpness measurement, and focus search.
 - `Sources/FramePerformance.swift`: bounded processing-time samples and capture-delivery counters.
 - `Sources/TargetAppearance.swift`: appearance checks and multiscale recovery.
+- `Sources/ForegroundModel.swift`: painted-surface foreground tracking and recovery confirmation.
 - `Sources/VisionIdentity.swift`: learned target/background image similarity verification.
 - `Sources/FocusUSB.c`: C930e USB camera-terminal controls through IOKit.
 - `Tests/`: deterministic focus logic tests and opt-in physical camera checks.

@@ -43,6 +43,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var confirmation = ReacquisitionConfirmation()
     private let identity = VisionIdentity()
     private var lastIdentityCheck = 0.0
+    private var foreground: ForegroundTracker?
     private var performance = FramePerformance(started:0)
     private var lastPerformanceReport = 0.0
     private var performanceFile: FileHandle?
@@ -141,6 +142,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             self.appearance = nil; self.anchorAppearance = nil; self.recoveringSince = nil
             self.appearanceLibrary = []; self.originalSelectionSize = rectangle.size; self.confirmation.reset()
             self.identity.reset()
+            self.foreground = nil
             self.resetTracker(rectangle)
             self.startNow(wide: true, minimum: self.lower, maximum: self.upper, exhaustive: false)
             self.publish()
@@ -186,8 +188,8 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func beginSweep(wide: Bool, at time: Double, exhaustive: Bool = false) {
         let search = FocusSweep(current: snapshot.focus, minimum: lower, maximum: upper, step: snapshot.step, wide: wide, exhaustive: exhaustive)
         sweep = search; search.didMove(at: time)
-        if wide { acquisition.begin() } else { acquisition.cancel() }
-        snapshot.message = wide ? "Acquiring focus… hold the mini inside the fixed box until the search finishes." : "Following miniature • checking focus inside your selection"
+        if wide && foreground?.ready != true { acquisition.begin() } else { acquisition.cancel() }
+        snapshot.message = acquiring ? "Acquiring focus… hold the mini inside the fixed box until the search finishes." : "Following miniature • checking focus inside your selection"
     }
     private func pauseAtStable() {
         if snapshot.active, sweep != nil, snapshot.focus != stableFocus { _ = move(to: stableFocus) }
@@ -206,6 +208,7 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         snapshot.active = false; sweep = nil; acquisition.cancel(); recoveringSince = nil; followRequested = false
         snapshot.target = nil; snapshot.lost = false; appearanceLibrary = []; appearance = nil; anchorAppearance = nil; tracker = nil
         identity.reset()
+        foreground = nil
         guard let usb = usb else { return }
         if focus_restore(usb) != 0 {
             var position: Int32 = 0, automatic: Int32 = 0
@@ -257,7 +260,12 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let frame = makeAppearanceFrame(buffer)
             if sweep == nil, acquisition.releaseIfSettled(at: time) {
                 resetTracker(previous)
-                if !identity.ready {
+                if foreground == nil {
+                    let model = ForegroundModel(frame:frame,target:previous)
+                    foreground = ForegroundTracker(model:model,seed:previous)
+                    if diagnostic { print("FOREGROUND ready=\(model.ready) \(model.diagnosticSummary)") }
+                }
+                if foreground?.ready != true && !identity.ready {
                     snapshot.message = "Learning miniature identity and background…"; publish()
                     let learned = identity.enroll(buffer, rect: previous)
                     lastFrameAt = ProcessInfo.processInfo.systemUptime
@@ -333,6 +341,25 @@ final class CameraEngine: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         return AppearanceFrame(width: width, height: height, rgb: rgb)
     }
     private func track(buffer: CVPixelBuffer, frame: AppearanceFrame, previous: CGRect, at time: Double) -> Bool {
+        if let foreground = foreground, foreground.ready {
+            switch foreground.update(frame,at:time) {
+            case .found(let rect,let confidence,let recovered):
+                let resume = snapshot.lost || !snapshot.active && followRequested
+                snapshot.target = rect; snapshot.confidence = Float(confidence); snapshot.lost = false
+                recoveringSince = nil
+                if recovered || resume { resetTracker(rect) }
+                snapshot.active = followRequested
+                if resume && followRequested { beginSweep(wide:true,at:time) }
+                else if sweep == nil { snapshot.message = followRequested ? "Following miniature • focus settled" : "Holding focus • miniature tracked" }
+                return true
+            case .confirming, .missing:
+                pauseAtStable()
+                snapshot.lost = true; snapshot.confidence = 0
+                if recoveringSince == nil { recoveringSince = time }
+                snapshot.message = "Looking for the miniature • holding focus until its return is confirmed"
+                return false
+            }
+        }
         if snapshot.lost || recoveringSince != nil {
             return recover(buffer: buffer, frame: frame, previous: previous, at: time)
         }

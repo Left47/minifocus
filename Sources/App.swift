@@ -102,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         performance.font = .monospacedSystemFont(ofSize:11,weight:.regular); performance.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 14, weight: .medium); status.maximumNumberOfLines = 3
         status.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
-        let help = NSTextField(wrappingLabelWithString: "Draw a box and hold the mini steady for focus. If it leaves the frame, focus holds and following resumes when it returns.\nOBS: use the Logitech C930e as your Video Capture Device; leave native autofocus off. Hold pauses lens changes. Reacquire runs a full search. Search limits use lens units, not inches.")
+        let help = NSTextField(wrappingLabelWithString: "Draw a box and hold steady for focus. The box can follow exposed paint while a hand or brush covers the rest.\nFocus holds when the mini disappears. Keep the camera fixed after selection. OBS captures the C930e directly; leave native autofocus off.")
         help.textColor = .secondaryLabelColor; help.font = .systemFont(ofSize: 12); help.maximumNumberOfLines = 4
         let stack = NSStackView(views: [title, subtitle, preview, buttons, limits, metrics, performance, status, help])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12

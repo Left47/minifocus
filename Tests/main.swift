@@ -104,6 +104,12 @@ for turns in [1,2,3] {
 }
 let enlargedBox = CGRect(x: referenceBox.midX-0.15*1.6/2+0.03, y: referenceBox.midY-0.25*1.6/2, width: 0.15*1.6, height: 0.25*1.6)
 let closeFrame = testFrame(target: enlargedBox, addDistractor: true)
+let foreground = ForegroundModel(frame:referenceFrame,target:referenceBox)
+check(foreground.ready, "Foreground learns a distinct paint signature from the selected target")
+let steadyForeground = foreground.candidates(in:referenceFrame,previous:referenceBox,recovering:false)
+check(steadyForeground.first?.rect.contains(CGPoint(x:referenceBox.midX,y:referenceBox.midY)) == true, "Stationary mini remains a foreground candidate at the tracked location")
+let closeForeground = foreground.candidates(in:closeFrame,previous:referenceBox,recovering:true)
+check(closeForeground.first?.rect.contains(CGPoint(x:enlargedBox.midX,y:enlargedBox.midY)) == true, "Foreground finds the closer miniature without requiring the old silhouette")
 let recovered = closeFrame.locate(signature, around: referenceBox, broad: true)
 check(recovered != nil, "Multiscale recovery finds a closer miniature")
 if let recovered = recovered {
@@ -111,9 +117,93 @@ if let recovered = recovered {
     check(abs(recovered.rect.midX-enlargedBox.midX) < 0.05 && abs(recovered.rect.midY-enlargedBox.midY) < 0.05, "Recovery stays on the miniature despite nearby distractor")
 }
 let noTarget = testFrame(target: CGRect(x: 2,y: 2,width: 0.1,height: 0.1), addDistractor: true)
+check(foreground.candidates(in:noTarget,previous:referenceBox,recovering:true).isEmpty, "Foreground rejects the face-colored distractor when the miniature is absent")
 check(noTarget.locate(signature, around: referenceBox, broad: true) == nil, "Recovery rejects an unrelated background and skin-colored distractor")
 let returnedBox = CGRect(x: 0.73, y: 0.65, width: 0.15, height: 0.25)
 let returnedFrame = testFrame(target: returnedBox, addDistractor: true)
+check(foreground.candidates(in:returnedFrame,previous:referenceBox,recovering:true).first?.rect.contains(CGPoint(x:returnedBox.midX,y:returnedBox.midY)) == true, "Foreground returns to a miniature at a new frame location")
+let foregroundTracker = ForegroundTracker(model:foreground,seed:referenceBox)
+if case .confirming = foregroundTracker.update(referenceFrame,at:0) { checks += 1 } else { fatalError("New foreground target must be confirmed across frames") }
+if case .found = foregroundTracker.update(referenceFrame,at:0.15) { checks += 1 } else { fatalError("Confirmed miniature should be tracked") }
+if case .missing = foregroundTracker.update(noTarget,at:0.30) { checks += 1 } else { fatalError("Empty frame should hold focus and preserve the reference") }
+if case .confirming = foregroundTracker.update(returnedFrame,at:100) { checks += 1 } else { fatalError("Returning object cannot immediately restart autofocus") }
+if case .found(let box,_,let recovered) = foregroundTracker.update(returnedFrame,at:100.15) {
+    check(recovered && box.contains(CGPoint(x:returnedBox.midX,y:returnedBox.midY)), "Mini is recovered after a long absence at a different location")
+} else { fatalError("Confirmed returned miniature should recover") }
+var twoTargets = returnedFrame.rgb
+for y in 0..<180 { for x in 0..<320 {
+    let i = (y*320+x)*3
+    if referenceBox.contains(CGPoint(x:(Double(x)+0.5)/320,y:1-(Double(y)+0.5)/180)) {
+        twoTargets[i] = referenceFrame.rgb[i]; twoTargets[i+1] = referenceFrame.rgb[i+1]; twoTargets[i+2] = referenceFrame.rgb[i+2]
+    }
+} }
+_ = foregroundTracker.update(noTarget,at:101)
+let ambiguousFrame = AppearanceFrame(width:320,height:180,rgb:twoTargets)
+if case .confirming = foregroundTracker.update(ambiguousFrame,at:101.2) { checks += 1 } else { fatalError("Two equally likely separated objects must not trigger focus movement") }
+let continuing = ForegroundTracker(model:foreground,seed:referenceBox)
+_ = continuing.update(referenceFrame,at:0); _ = continuing.update(referenceFrame,at:0.15)
+if case .found(let box,_,_) = continuing.update(ambiguousFrame,at:0.3) {
+    check(referenceBox.contains(CGPoint(x:box.midX,y:box.midY)), "A second similar foreground object does not steal an already tracked mini")
+} else { fatalError("Existing miniature should remain tracked when another object enters") }
+// A same-colored shelf object is a negative example when it was stationary
+// during enrollment; its paint similarity must not make it the recovered mini.
+let shelfBox = CGRect(x:0.72,y:0.65,width:0.12,height:0.20)
+let shelfFrame = testFrame(target:shelfBox)
+var initialWithShelf = referenceFrame.rgb
+for y in 0..<180 { for x in 0..<320 {
+    if shelfBox.contains(CGPoint(x:(Double(x)+0.5)/320,y:1-(Double(y)+0.5)/180)) {
+        let i = (y*320+x)*3
+        initialWithShelf[i] = shelfFrame.rgb[i]; initialWithShelf[i+1] = shelfFrame.rgb[i+1]; initialWithShelf[i+2] = shelfFrame.rgb[i+2]
+    }
+} }
+let shelfModel = ForegroundModel(frame:AppearanceFrame(width:320,height:180,rgb:initialWithShelf),target:referenceBox)
+check(shelfModel.ready, "Distinct miniature paint can be learned even when the room contains a similar color")
+check(shelfModel.candidates(in:shelfFrame,previous:referenceBox,recovering:true).isEmpty, "Unchanged same-colored shelf object cannot replace the absent mini")
+func handheldFrame(visible: Bool, shiftedHand: Bool = false, cover: CGRect? = nil) -> AppearanceFrame {
+    var rgb = [UInt8](repeating:55,count:320*180*3)
+    let palm = shiftedHand ? CGRect(x:0.50,y:0.20,width:0.25,height:0.50) : referenceBox.insetBy(dx:-0.06,dy:-0.10)
+    for y in 0..<180 { for x in 0..<320 {
+        let p = CGPoint(x:(Double(x)+0.5)/320,y:1-(Double(y)+0.5)/180), i = (y*320+x)*3
+        if palm.contains(p) { rgb[i]=215; rgb[i+1]=145; rgb[i+2]=115 }
+        let u = (p.x-referenceBox.midX)/(referenceBox.width*0.44), v = (p.y-referenceBox.midY)/(referenceBox.height*0.44)
+        if visible && u*u+v*v <= 1 {
+            rgb[i]=referenceFrame.rgb[i]; rgb[i+1]=referenceFrame.rgb[i+1]; rgb[i+2]=referenceFrame.rgb[i+2]
+        }
+        if cover?.contains(p) == true { rgb[i]=215; rgb[i+1]=145; rgb[i+2]=115 }
+    } }
+    return AppearanceFrame(width:320,height:180,rgb:rgb)
+}
+let heldMini = handheldFrame(visible:true)
+let handModel = ForegroundModel(frame:heldMini,target:referenceBox)
+check(handModel.ready, "Mini paint can be learned with a hand in the selection and no visible face")
+check(handModel.candidates(in:handheldFrame(visible:false,shiftedHand:true),previous:referenceBox,recovering:true).isEmpty, "A moving hand alone cannot become the recovered target")
+let fingerCover = CGRect(x:referenceBox.midX,y:referenceBox.minY,width:referenceBox.width,height:referenceBox.height)
+let partiallyCovered = handheldFrame(visible:true,cover:fingerCover)
+check(handModel.candidates(in:partiallyCovered,previous:referenceBox,recovering:false).first?.rect.midX ?? 1 < referenceBox.midX+0.03, "Partial finger occlusion keeps focus on exposed painted surface")
+let handTracker = ForegroundTracker(model:handModel,seed:referenceBox)
+_ = handTracker.update(heldMini,at:0); _ = handTracker.update(heldMini,at:0.15)
+if case .missing = handTracker.update(handheldFrame(visible:false),at:0.3) { checks += 1 } else { fatalError("A fully covered mini must hold focus") }
+_ = handTracker.update(heldMini,at:0.45)
+if case .found(_,_,let recovered) = handTracker.update(heldMini,at:0.60) { check(recovered,"Mini is recovered after the covering hand moves away") }
+else { fatalError("Uncovered miniature must be recoverable without a face reference") }
+var brushPixels = noTarget.rgb
+let greenBrush = CGRect(x:0.50,y:0.10,width:0.018,height:0.65)
+let holder = CGRect(x:referenceBox.minX,y:0.05,width:referenceBox.width,height:0.20)
+for y in 0..<180 { for x in 0..<320 {
+    let point = CGPoint(x:(Double(x)+0.5)/320,y:1-(Double(y)+0.5)/180), i = (y*320+x)*3
+    if greenBrush.contains(point) { brushPixels[i]=15; brushPixels[i+1]=130; brushPixels[i+2]=55 }
+    if holder.contains(point) { brushPixels[i]=20; brushPixels[i+1]=20; brushPixels[i+2]=20 }
+} }
+check(handModel.candidates(in:AppearanceFrame(width:320,height:180,rgb:brushPixels),previous:referenceBox,recovering:true).isEmpty, "A thin same-paint-colored brush and dark painting handle do not replace the missing mini")
+let crossingBrush = CGRect(x:referenceBox.midX-0.01,y:referenceBox.minY-0.05,width:0.02,height:referenceBox.height+0.10)
+let brushedMini = handheldFrame(visible:true,cover:crossingBrush)
+check(!handModel.candidates(in:brushedMini,previous:referenceBox,recovering:false).isEmpty, "Visible painted surfaces remain available when a brush crosses the mini")
+var neutralPixels = referenceFrame.rgb
+for i in stride(from:0,to:neutralPixels.count,by:3) {
+    let gray = UInt8((Int(neutralPixels[i])+Int(neutralPixels[i+1])+Int(neutralPixels[i+2]))/3)
+    neutralPixels[i]=gray;neutralPixels[i+1]=gray;neutralPixels[i+2]=gray
+}
+check(!ForegroundModel(frame:AppearanceFrame(width:320,height:180,rgb:neutralPixels),target:referenceBox).ready, "A neutral-only target uses the image-identity fallback rather than a broad gray-color lock")
 let searchStarted = Date()
 let returned = returnedFrame.reidentify([signature], reference: referenceBox, originalSize: referenceBox.size)
 let globalSearchSeconds = Date().timeIntervalSince(searchStarted)
