@@ -1,0 +1,21 @@
+Logitech C930e focus-control test — 2026-11-23
+
+Device: Logitech Webcam C930e (USB 046d:0843)
+Connection: macOS IOKit USB video-control interface 0, camera terminal 1
+Original autofocus: 0 (off)
+Original absolute focus: 45
+Reported focus range: 0..255, step 5 (device units, not distance)
+
+Write test: requested focus 50, camera readback 50 — PASS
+Restore: requested focus 45, camera readback 45 — PASS
+Restore: autofocus 0, camera readback 0 — PASS
+
+This confirms USB control and setting readback. It does not measure optical
+sharpness, tracking performance, or simultaneous operation with OBS.
+No video or audio was captured.
+
+Source: focus_probe.c
+Build: clang -Wall -Wextra focus_probe.c -framework IOKit -framework CoreFoundation -o /tmp/mini-focus-probe
+Read only: /tmp/mini-focus-probe
+Write/readback/restore test: /tmp/mini-focus-probe --test
+Restricted shell access initially blocked USB access; the test succeeded outside it.

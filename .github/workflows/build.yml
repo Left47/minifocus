@@ -1,0 +1,21 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test focus logic
+        run: bash scripts/test.sh
+      - name: Build native application
+        run: bash scripts/build.sh
+      - name: Package application
+        run: ditto -c -k --sequesterRsrc --keepParent build/MiniFocus.app build/MiniFocus.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiniFocus-macos
+          path: build/MiniFocus.zip
